@@ -1,0 +1,6 @@
+data/
+venv/
+.zed/
+.ropeproject/
+.ruff_cache/
+.idea/
