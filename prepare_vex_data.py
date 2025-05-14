@@ -22,6 +22,7 @@ test_files = [
     "data/extracted/2021/cve-2021-34558.json",
     "data/extracted/2018/cve-2018-18495.json",
     "data/extracted/2016/cve-2016-0721.json",
+    "data/extracted/2022/cve-2022-3723.json",
 ]
 
 
@@ -46,16 +47,17 @@ class VEXParser:
         self.description = self.extract_description()
         self.statement = self.extract_statement()
         self.cwe = self.extract_cwe_id()
-        self.acknowledgments = self.extract_acknowlegments()
+        self.acknowledgments = self.extract_acknowledgments()
+        self.exploit_exists = self.extract_exploit()
+        # TODO: needs to be per product ID
+        # self.impact = self.extract_impact()
+        self.references = self.extract_references()
 
         # TODO:
-        # CWE ID
-        # Exploit
         # Products and components
-        # acks
         # References
-        # CVSS
-        # impact
+        # CVSS - per product
+        # impact  - get form threats
         # mitigation  - get from remediations
         # public
         # discovered
@@ -108,12 +110,24 @@ class VEXParser:
             None,
         )
 
-    def extract_acknowlegments(self):
+    def extract_acknowledgments(self) -> None | str:
         if "acknowledgments" not in self.vulnerability:
-            return
-        acknowledgments = []
+            return None
+        acks = []
         for ack in self.vulnerability["acknowledgments"]:
-            acknowledgments.append(ack.get("text"))
+            ack_lines = []
+
+            if "names" in ack and ack["names"]:
+                ack_lines.append(f"  Contributor: {'; '.join(ack['names'])}")
+            if "organization" in ack and ack["organization"]:
+                ack_lines.append(f"  Organization: {ack['organization']}")
+            if "summary" in ack and ack["summary"]:
+                ack_lines.append(f"  Details: {ack['summary']}")
+
+            acks.append("- " + ack_lines[0][2:])
+            acks.extend(ack_lines[1:])
+
+        return "\n".join(acks) if acks else None
 
     def extract_cve_id(self) -> None | str:
         return self.vulnerability.get("cve")
@@ -124,12 +138,49 @@ class VEXParser:
             return f"{cwe['id']} ({cwe['name']})"
         return cwe
 
-    def print(self) -> None:
+    def extract_exploit(self) -> bool:
+        return any(
+            threat["category"] == "exploit_status"
+            for threat in self.vulnerability.get("threats", [])
+        )
+
+    def extract_references(self) -> None | str:
+        if "references" not in self.vulnerability:
+            return None
+        refs = []
+        for ref in self.vulnerability["references"]:
+            if ref["summary"] == ref["url"]:
+                refs.append(f"- External: {ref['url']}")
+            else:
+                refs.append(f"- {ref['summary']}: {ref['url']}")
+
+        return "\n".join(refs)
+
+    # def extract_impact(self) -> str:
+    #     # TODO: needs to be per-product ID
+    #     return next(
+    #         (
+    #             threat.get("text")
+    #             for threat in self.vulnerability["threats"]
+    #             if threat.get("category") == "other" and threat.get("title") == "Statement"
+    #         ),
+    #         None,
+    #     )
+
+    def print_text(self) -> None:
         print("BEGIN_VULNERABILITY")
         print("CVE ID:", self.cve)
-        print("Summary:", self.summary)
-        print("Description:", self.description)
-        print("CWE:", self.cwe)
+        if self.summary:
+            print("Summary:", self.summary)
+        if self.description:
+            print("Description:", self.description)
+        if self.references:
+            print("References:\n" + self.references)
+        if self.cwe:
+            print("CWE:", self.cwe)
+        if self.acknowledgments:
+            print("Acknowledgments:\n" + self.acknowledgments)
+        print(f"Exploit exists: {self.exploit_exists}")
         print("END_VULNERABILITY")
 
     def save_to_files(self):
@@ -175,7 +226,7 @@ def main():
         vex = VEXParser(file, json_data)
 
         if args.print:
-            vex.print()
+            vex.print_text()
         else:
             vex.save_to_files()
 
