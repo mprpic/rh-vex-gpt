@@ -46,13 +46,15 @@ class VEXParser:
         self.cwe = self.extract_cwe_id()
         self.acknowledgments = self.extract_acknowledgments()
         self.exploit_exists = self.extract_exploit()
-
+        self.mitigation = self.extract_mitigation()
         self.references = self.extract_references()
         self.discovered_dt = self.extract_discovered_date()
         self.public_date = self.extract_public_date()
 
-        # TODO: needs to be per product ID
-        # self.impact = self.extract_impact()
+        self.products, self.components = self.extract_products_and_components()
+        self.relationships = self.extract_relationship_ids()
+        self.rel_to_impact = self.extract_impact()
+        self.rel_to_cvss = self.extract_cvss()
         # Products and components
         # CVSS - per product
         # impact  - get form threats
@@ -158,16 +160,75 @@ class VEXParser:
 
         return "\n".join(refs)
 
-    # def extract_impact(self) -> str:
-    #     # TODO: needs to be per-product ID
-    #     return next(
-    #         (
-    #             threat.get("text")
-    #             for threat in self.vulnerability["threats"]
-    #             if threat.get("category") == "other" and threat.get("title") == "Statement"
-    #         ),
-    #         None,
-    #     )
+    def extract_mitigation(self) -> None | str:
+        for remediation in self.vulnerability.get("remediations", []):
+            # Only one mitigation can exist and it applies to all products.
+            if remediation["category"] == "workaround":
+                return remediation["details"]
+        return None
+
+    def extract_products_and_components(self) -> (dict, dict):
+        product_id_to_cpe = {}
+        component_id_to_cpe = {}
+
+        def process_branch(branch):
+            if "product" in branch:
+                product = branch["product"]
+                product_id = product.get("product_id")
+
+                if product_id and "product_identification_helper" in product:
+                    helper = product["product_identification_helper"]
+                    if "cpe" in helper:
+                        product_id_to_cpe[product_id] = {
+                            "cpe": helper["cpe"],
+                            "name": product["name"],
+                        }
+                    if "purl" in helper:
+                        component_id_to_cpe[product_id] = helper["purl"]
+
+            # Process any sub-branches recursively
+            if "branches" in branch:
+                for sub_branch in branch["branches"]:
+                    process_branch(sub_branch)
+
+        # Process all top-level branches
+        for branch in self.product_tree.get("branches", []):
+            process_branch(branch)
+
+        return product_id_to_cpe, component_id_to_cpe
+
+    def extract_relationship_ids(self) -> list:
+        relationship_ids = []
+        for rel in self.product_tree.get("relationships"):
+            relationship_ids.append(rel["full_product_name"]["product_id"])
+        return relationship_ids
+
+    def extract_impact(self) -> dict:
+        rel_to_impact = {}
+        for threat in self.vulnerability.get("threats", []):
+            if threat["category"] == "impact":
+                for product_id in threat["product_ids"]:
+                    rel_to_impact[product_id] = threat["details"]
+        return rel_to_impact
+
+    def extract_cvss(self) -> dict:
+        rel_to_cvss = {}
+        for score in self.vulnerability.get("scores", []):
+            if "cvss_v2" in score:
+                cvss = {
+                    "score": score["cvss_v2"]["baseScore"],
+                    "vector": score["cvss_v2"]["vectorString"],
+                }
+            elif "cvss_v3" in score:
+                cvss = {
+                    "score": score["cvss_v3"]["baseScore"],
+                    "vector": score["cvss_v3"]["vectorString"].removeprefix("CVSS:3.1/"),
+                }
+            else:
+                raise ValueError(f"Unrecognized score type in {self.file}: {score}")
+            for rel_id in score["products"]:
+                rel_to_cvss[rel_id] = cvss
+        return rel_to_cvss
 
     def print_text(self) -> None:
         print("BEGIN_VULNERABILITY")
@@ -179,6 +240,10 @@ class VEXParser:
             print("Summary:", self.summary)
         if self.description:
             print("Description:", self.description)
+        if self.mitigation:
+            print("Mitigation:", self.mitigation)
+        if self.statement:
+            print("Statement:", self.statement)
         if self.references:
             print("References:\n" + self.references)
         if self.cwe:
@@ -186,6 +251,13 @@ class VEXParser:
         if self.acknowledgments:
             print("Acknowledgments:\n" + self.acknowledgments)
         print(f"Exploit exists: {self.exploit_exists}")
+        from pprint import pprint
+
+        # pprint(self.products)
+        # pprint(self.components)
+        # pprint(self.relationships)
+        # pprint(self.rel_to_impact)
+        # pprint(self.rel_to_cvss)
         print("END_VULNERABILITY")
 
     def save_to_files(self):
