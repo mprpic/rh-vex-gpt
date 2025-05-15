@@ -39,9 +39,6 @@ class VEXParser:
         self.vulnerability = self.data["vulnerabilities"][0]
         self.product_tree = self.data["product_tree"]
         self.document_metadata = self.data["document"]
-
-        # TODO: recognize unaffected CVE and "finish" early
-
         self.cve = self.extract_cve_id()
         self.summary = self.extract_summary()
         self.description = self.extract_description()
@@ -49,18 +46,17 @@ class VEXParser:
         self.cwe = self.extract_cwe_id()
         self.acknowledgments = self.extract_acknowledgments()
         self.exploit_exists = self.extract_exploit()
+
+        self.references = self.extract_references()
+        self.discovered_dt = self.extract_discovered_date()
+        self.public_date = self.extract_public_date()
+
         # TODO: needs to be per product ID
         # self.impact = self.extract_impact()
-        self.references = self.extract_references()
-
-        # TODO:
         # Products and components
-        # References
         # CVSS - per product
         # impact  - get form threats
         # mitigation  - get from remediations
-        # public
-        # discovered
         #
 
     def _validate(self) -> None:
@@ -144,6 +140,12 @@ class VEXParser:
             for threat in self.vulnerability.get("threats", [])
         )
 
+    def extract_discovered_date(self) -> None | str:
+        return self.vulnerability.get("discovery_date")
+
+    def extract_public_date(self) -> None | str:
+        return self.vulnerability.get("release_date")
+
     def extract_references(self) -> None | str:
         if "references" not in self.vulnerability:
             return None
@@ -170,6 +172,9 @@ class VEXParser:
     def print_text(self) -> None:
         print("BEGIN_VULNERABILITY")
         print("CVE ID:", self.cve)
+        if self.discovered_dt:
+            print("Discovered date:", self.discovered_dt)
+        print("Public date:", self.public_date)
         if self.summary:
             print("Summary:", self.summary)
         if self.description:
@@ -223,8 +228,12 @@ def main():
     for file in files:
         with open(file) as f:
             json_data = f.read()
-        vex = VEXParser(file, json_data)
 
+        if '"cpe:/a:redhat"' in json_data:
+            # Skip VEX files for CVEs that do not affect Red Hat products.
+            continue
+
+        vex = VEXParser(file, json_data)
         if args.print:
             vex.print_text()
         else:
