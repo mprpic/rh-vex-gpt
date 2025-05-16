@@ -55,11 +55,6 @@ class VEXParser:
         self.relationships = self.extract_relationship_ids()
         self.rel_to_impact = self.extract_impact()
         self.rel_to_cvss = self.extract_cvss()
-        # Products and components
-        # CVSS - per product
-        # impact  - get form threats
-        # mitigation  - get from remediations
-        #
 
     def _validate(self) -> None:
         """Check that this is a valid VEX file with all the data we expect it to have"""
@@ -171,6 +166,11 @@ class VEXParser:
         product_id_to_cpe = {}
         component_id_to_cpe = {}
 
+        def normalize_rhel_product_name(cpe):
+            # Arbitrary rules to convert the myriad of ways RHEL if named into something more
+            # normalized and readable.
+            return ""
+
         def process_branch(branch):
             if "product" in branch:
                 product = branch["product"]
@@ -179,9 +179,14 @@ class VEXParser:
                 if product_id and "product_identification_helper" in product:
                     helper = product["product_identification_helper"]
                     if "cpe" in helper:
+                        cpe = helper["cpe"]
+                        product_name = product["name"]
+                        if ":rhel_" or ":enterprise_linux: " in cpe:
+                            product_name = normalize_rhel_product_name(cpe)
+
                         product_id_to_cpe[product_id] = {
-                            "cpe": helper["cpe"],
-                            "name": product["name"],
+                            "cpe": cpe,
+                            "name": product_name,
                         }
                     if "purl" in helper:
                         component_id_to_cpe[product_id] = helper["purl"]
@@ -253,11 +258,11 @@ class VEXParser:
         print(f"Exploit exists: {self.exploit_exists}")
         from pprint import pprint
 
-        # pprint(self.products)
-        # pprint(self.components)
-        # pprint(self.relationships)
-        # pprint(self.rel_to_impact)
-        # pprint(self.rel_to_cvss)
+        pprint(self.products)
+        pprint(self.components)
+        pprint(self.relationships)
+        pprint(self.rel_to_impact)
+        pprint(self.rel_to_cvss)
         print("END_VULNERABILITY")
 
     def save_to_files(self):
