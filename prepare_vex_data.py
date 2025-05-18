@@ -3,13 +3,15 @@
 # dependencies = [
 # ]
 # ///
-
+import re
 import sys
 import argparse
 import glob
 import json
 import os
+from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 DATA_DIR = Path(__file__).parent / "data"
 EXTRACTED_DIR = DATA_DIR / "extracted"
@@ -23,6 +25,7 @@ test_files = [
     "data/extracted/2018/cve-2018-18495.json",
     "data/extracted/2016/cve-2016-0721.json",
     "data/extracted/2022/cve-2022-3723.json",
+    "data/extracted/2024/cve-2024-53907.json",
 ]
 
 
@@ -55,6 +58,9 @@ class VEXParser:
         self.relationships = self.extract_relationship_ids()
         self.rel_to_impact = self.extract_impact()
         self.rel_to_cvss = self.extract_cvss()
+        self.rel_to_affectedness = self.extract_product_status()
+
+        self.product_map = self.generate_product_map()
 
     def _validate(self) -> None:
         """Check that this is a valid VEX file with all the data we expect it to have"""
@@ -162,34 +168,56 @@ class VEXParser:
                 return remediation["details"]
         return None
 
-    def extract_products_and_components(self) -> (dict, dict):
-        product_id_to_cpe = {}
-        component_id_to_cpe = {}
+    def extract_products_and_components(self) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+        product_data: dict[str, dict[str, str]] = {}
+        component_data: dict[str, str] = {}
 
-        def normalize_rhel_product_name(cpe):
-            # Arbitrary rules to convert the myriad of ways RHEL if named into something more
-            # normalized and readable.
-            return ""
+        def normalize_rhel_product_name(cpe: str, product_id: str, product_name: str) -> str:
+            """Arbitrary rules to convert the myriad of ways RHEL is named into something more
+            normalized and readable."""
+            # Ignore known bad CPE for RHEL SAM
+            if "rhel_sam" in cpe:
+                return product_name
 
-        def process_branch(branch):
+            # Check if we already have a good enough product name and version
+            if not re.match(r"^Red Hat Enterprise Linux \d{1,2}(\.\d{1,2})?$", product_name):
+                # If not, find the version from the product ID.
+                if version := re.search(r"(\d{1,2}\.\d{1,2})", product_id):
+                    return f"Red Hat Enterprise Linux {version.group(1)}"
+
+            return product_name
+
+        def process_branch(branch: dict[str, Any]) -> None:
             if "product" in branch:
                 product = branch["product"]
                 product_id = product.get("product_id")
 
-                if product_id and "product_identification_helper" in product:
+                if "product_identification_helper" in product:
                     helper = product["product_identification_helper"]
                     if "cpe" in helper:
                         cpe = helper["cpe"]
                         product_name = product["name"]
-                        if ":rhel_" or ":enterprise_linux: " in cpe:
-                            product_name = normalize_rhel_product_name(cpe)
+                        if (":rhel_" in cpe) or (":enterprise_linux:" in cpe):
+                            product_name = normalize_rhel_product_name(
+                                cpe, product_id, product_name
+                            )
 
-                        product_id_to_cpe[product_id] = {
+                        product_data[product_id] = {
                             "cpe": cpe,
                             "name": product_name,
                         }
                     if "purl" in helper:
-                        component_id_to_cpe[product_id] = helper["purl"]
+                        component_data[product_id] = helper["purl"]
+
+                if (
+                    branch["category"] == "product_version"
+                    and "product_identification_helper" not in product
+                ):
+                    # E.g. 2021/cve-2021-34558.json
+                    print(
+                        f"ERROR: missing product identification helper for {product_id} "
+                        f"in {self.file}"
+                    )
 
             # Process any sub-branches recursively
             if "branches" in branch:
@@ -197,10 +225,10 @@ class VEXParser:
                     process_branch(sub_branch)
 
         # Process all top-level branches
-        for branch in self.product_tree.get("branches", []):
-            process_branch(branch)
+        for b in self.product_tree.get("branches", []):
+            process_branch(b)
 
-        return product_id_to_cpe, component_id_to_cpe
+        return product_data, component_data
 
     def extract_relationship_ids(self) -> list:
         relationship_ids = []
@@ -235,34 +263,101 @@ class VEXParser:
                 rel_to_cvss[rel_id] = cvss
         return rel_to_cvss
 
+    def extract_product_status(self) -> dict:
+        rel_to_affectedness = {}
+        for status, product_ids in self.vulnerability.get("product_status", {}).items():
+            for product_id in product_ids:
+                rel_to_affectedness[product_id] = status
+        return rel_to_affectedness
+
+    def generate_product_map(self) -> dict:
+        product_map = {}
+
+        def add_to_product_map(rel_id, product_name, product_cpe, component_purl):
+            cvss = self.rel_to_cvss[rel_id]
+            cvss = f"{cvss['score']} | {cvss['vector']}"
+
+            if product_name not in product_map:
+                product_map[product_name] = {
+                    "cpes": {product_cpe},
+                    "components": [component_purl],
+                    "affectedness": {self.rel_to_affectedness[rel_id]},
+                    "cvss": {cvss},
+                    "impact": {self.rel_to_impact[rel_id]},
+                }
+
+            else:
+                product_map[product_name]["cpes"].add(self.products[product_id]["cpe"])
+                product_map[product_name]["components"].append(component_purl)
+                product_map[product_name]["affectedness"].add(self.rel_to_affectedness[rel_id])
+                product_map[product_name]["cvss"].add(cvss)
+                product_map[product_name]["impact"].add(self.rel_to_impact[rel_id])
+
+        for rel_id in self.relationships:
+            product_id, component_id = rel_id.split(":", maxsplit=1)
+
+            product_data = self.products[product_id]
+            product_name = product_data["name"]
+            product_cpe = product_data["cpe"]
+
+            if component_id not in self.components:
+                # Let's try splitting again in case this ID consists of an RPM module and RPM
+                parts = component_id.split(":")
+                rpm_mod_id, comp_id = ":".join(parts[0:4]), ":".join(parts[4:])
+
+                if rpm_mod_id not in self.components:
+                    print(f"ERROR: Missing RPM module component {rpm_mod_id} in {self.file}")
+                    continue
+                if comp_id not in self.components:
+                    print(f"WARNING: Missing RPM component {comp_id} in {self.file}")
+                    continue
+
+                rpm_mod_purl = self.components[rpm_mod_id]
+                add_to_product_map(rel_id, product_name, product_cpe, rpm_mod_purl)
+
+                comp_purl = self.components[comp_id]
+                add_to_product_map(rel_id, product_name, product_cpe, comp_purl)
+            else:
+                # Some components that may be missing a product helper identifier are not
+                # included in our components map so should be skipped here as well.
+                if component_id not in self.components:
+                    continue
+                comp_purl = self.components[component_id]
+                add_to_product_map(rel_id, product_name, product_cpe, comp_purl)
+
+        return product_map
+
     def print_text(self) -> None:
         print("BEGIN_VULNERABILITY")
         print("CVE ID:", self.cve)
-        if self.discovered_dt:
-            print("Discovered date:", self.discovered_dt)
-        print("Public date:", self.public_date)
-        if self.summary:
-            print("Summary:", self.summary)
-        if self.description:
-            print("Description:", self.description)
-        if self.mitigation:
-            print("Mitigation:", self.mitigation)
-        if self.statement:
-            print("Statement:", self.statement)
-        if self.references:
-            print("References:\n" + self.references)
-        if self.cwe:
-            print("CWE:", self.cwe)
-        if self.acknowledgments:
-            print("Acknowledgments:\n" + self.acknowledgments)
-        print(f"Exploit exists: {self.exploit_exists}")
+        # if self.discovered_dt:
+        #     print("Discovered date:", self.discovered_dt)
+        # print("Public date:", self.public_date)
+        # if self.summary:
+        #     print("Summary:", self.summary)
+        # if self.description:
+        #     print("Description:", self.description)
+        # if self.mitigation:
+        #     print("Mitigation:", self.mitigation)
+        # if self.statement:
+        #     print("Statement:", self.statement)
+        # if self.references:
+        #     print("References:\n" + self.references)
+        # if self.cwe:
+        #     print("CWE:", self.cwe)
+        # if self.acknowledgments:
+        #     print("Acknowledgments:\n" + self.acknowledgments)
+        # print(f"Exploit exists: {self.exploit_exists}")
         from pprint import pprint
 
-        pprint(self.products)
-        pprint(self.components)
-        pprint(self.relationships)
-        pprint(self.rel_to_impact)
-        pprint(self.rel_to_cvss)
+        #
+        # pprint(self.products)
+        # pprint(self.components)
+        # pprint(self.relationships)
+        # pprint(self.rel_to_impact)
+        # pprint(self.rel_to_cvss)
+        # pprint(self.rel_to_affectedness)
+        pprint(self.product_map)
         print("END_VULNERABILITY")
 
     def save_to_files(self):
