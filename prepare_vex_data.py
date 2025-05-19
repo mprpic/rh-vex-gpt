@@ -1,17 +1,19 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # dependencies = [
+#     "tqdm>=4.61.0"
 # ]
 # ///
-import re
-import sys
 import argparse
 import glob
 import json
 import os
-from collections import defaultdict
+import re
+import sys
 from pathlib import Path
 from typing import Any
+
+from tqdm import tqdm
 
 DATA_DIR = Path(__file__).parent / "data"
 EXTRACTED_DIR = DATA_DIR / "extracted"
@@ -213,11 +215,8 @@ class VEXParser:
                     branch["category"] == "product_version"
                     and "product_identification_helper" not in product
                 ):
-                    # E.g. 2021/cve-2021-34558.json
-                    print(
-                        f"ERROR: missing product identification helper for {product_id} "
-                        f"in {self.file}"
-                    )
+                    # E.g. 2021/cve-2021-34558.json, 2025/cve-2025-25208.json
+                    component_data[product_id] = "N/A"
 
             # Process any sub-branches recursively
             if "branches" in branch:
@@ -232,7 +231,7 @@ class VEXParser:
 
     def extract_relationship_ids(self) -> list:
         relationship_ids = []
-        for rel in self.product_tree.get("relationships"):
+        for rel in self.product_tree.get("relationships", []):
             relationship_ids.append(rel["full_product_name"]["product_id"])
         return relationship_ids
 
@@ -274,8 +273,9 @@ class VEXParser:
         product_map = {}
 
         def add_to_product_map(rel_id, product_name, product_cpe, component_purl):
-            cvss = self.rel_to_cvss[rel_id]
-            cvss = f"{cvss['score']} | {cvss['vector']}"
+            cvss = self.rel_to_cvss.get(rel_id)
+            cvss = f"{cvss['score']} | {cvss['vector']}" if cvss else "N/A"
+            impact = self.rel_to_impact.get(rel_id, "None")
 
             if product_name not in product_map:
                 product_map[product_name] = {
@@ -283,7 +283,7 @@ class VEXParser:
                     "components": [component_purl],
                     "affectedness": {self.rel_to_affectedness[rel_id]},
                     "cvss": {cvss},
-                    "impact": {self.rel_to_impact[rel_id]},
+                    "impact": {impact},
                 }
 
             else:
@@ -291,7 +291,14 @@ class VEXParser:
                 product_map[product_name]["components"].append(component_purl)
                 product_map[product_name]["affectedness"].add(self.rel_to_affectedness[rel_id])
                 product_map[product_name]["cvss"].add(cvss)
-                product_map[product_name]["impact"].add(self.rel_to_impact[rel_id])
+                product_map[product_name]["impact"].add(impact)
+
+        if not self.relationships:
+            for product_id, product_data in self.products.items():
+                product_name = product_data["name"]
+                product_cpe = product_data["cpe"]
+                add_to_product_map(product_id, product_name, product_cpe, "N/A")
+            return product_map
 
         for rel_id in self.relationships:
             product_id, component_id = rel_id.split(":", maxsplit=1)
@@ -330,34 +337,31 @@ class VEXParser:
     def print_text(self) -> None:
         print("BEGIN_VULNERABILITY")
         print("CVE ID:", self.cve)
-        # if self.discovered_dt:
-        #     print("Discovered date:", self.discovered_dt)
-        # print("Public date:", self.public_date)
-        # if self.summary:
-        #     print("Summary:", self.summary)
-        # if self.description:
-        #     print("Description:", self.description)
-        # if self.mitigation:
-        #     print("Mitigation:", self.mitigation)
-        # if self.statement:
-        #     print("Statement:", self.statement)
-        # if self.references:
-        #     print("References:\n" + self.references)
-        # if self.cwe:
-        #     print("CWE:", self.cwe)
-        # if self.acknowledgments:
-        #     print("Acknowledgments:\n" + self.acknowledgments)
-        # print(f"Exploit exists: {self.exploit_exists}")
-        from pprint import pprint
-
-        #
-        # pprint(self.products)
-        # pprint(self.components)
-        # pprint(self.relationships)
-        # pprint(self.rel_to_impact)
-        # pprint(self.rel_to_cvss)
-        # pprint(self.rel_to_affectedness)
-        pprint(self.product_map)
+        if self.discovered_dt:
+            print("Discovered date:", self.discovered_dt)
+        print("Public date:", self.public_date)
+        if self.summary:
+            print("Summary:", self.summary)
+        if self.description:
+            print("Description:", self.description)
+        if self.mitigation:
+            print("Mitigation:", self.mitigation)
+        if self.statement:
+            print("Statement:", self.statement)
+        if self.references:
+            print("References:\n" + self.references)
+        if self.cwe:
+            print("CWE:", self.cwe)
+        if self.acknowledgments:
+            print("Acknowledgments:\n" + self.acknowledgments)
+        print(f"Exploit exists: {self.exploit_exists}")
+        print(self.products)
+        print(self.components)
+        print(self.relationships)
+        print(self.rel_to_impact)
+        print(self.rel_to_cvss)
+        print(self.rel_to_affectedness)
+        print(self.product_map)
         print("END_VULNERABILITY")
 
     def save_to_files(self):
@@ -394,10 +398,11 @@ def main():
             print("No VEX files found in the input directory.")
             sys.exit(1)
 
-    files = test_files
+    # files = test_files
     print(f"Preparing data from {len(files)} files")
 
-    for file in files:
+    iterator = files if args.print else tqdm(files, "Processing VEX files")
+    for file in iterator:
         with open(file) as f:
             json_data = f.read()
 
