@@ -28,7 +28,21 @@ test_files = [
     "data/extracted/2016/cve-2016-0721.json",
     "data/extracted/2022/cve-2022-3723.json",
     "data/extracted/2024/cve-2024-53907.json",
+    "data/extracted/2025/cve-2025-46420.json",
+    "data/extracted/2025/cve-2025-46727.json",
+    "data/extracted/2025/cve-2025-37867.json",
+    "data/extracted/2025/cve-2025-3522.json",
+    "data/extracted/2025/cve-2025-2912.json",
 ]
+
+PRODUCT_STATUS_MAP = {
+    "known_not_affected": "Not Affected",
+    "known_affected": "Affected",
+    "under_investigation": "Under Investigation",
+    "fixed": "Fixed",
+}
+
+RESOLUTION_MAP = {"Affected": "Fix not yet available"}
 
 
 class InvalidVEXException(ValueError):
@@ -61,6 +75,7 @@ class VEXParser:
         self.rel_to_impact = self.extract_impact()
         self.rel_to_cvss = self.extract_cvss()
         self.rel_to_affectedness = self.extract_product_status()
+        self.rel_to_remediation = self.extract_remediations()
 
         self.product_map = self.generate_product_map()
 
@@ -246,52 +261,67 @@ class VEXParser:
     def extract_cvss(self) -> dict:
         rel_to_cvss = {}
         for score in self.vulnerability.get("scores", []):
-            if "cvss_v2" in score:
-                cvss = {
-                    "score": score["cvss_v2"]["baseScore"],
-                    "vector": score["cvss_v2"]["vectorString"],
-                }
-            elif "cvss_v3" in score:
-                cvss = {
-                    "score": score["cvss_v3"]["baseScore"],
-                    "vector": score["cvss_v3"]["vectorString"].removeprefix("CVSS:3.1/"),
-                }
+            for version_obj in ("cvss_v2", "cvss_v3"):
+                cvss_obj = score.get(version_obj)
+                if not cvss_obj:
+                    continue
+                cvss = (
+                    f"CVSSv{cvss_obj['version']}: {cvss_obj['baseScore']} / "
+                    f"{cvss_obj['vectorString'].removeprefix('CVSS:3.1/').removeprefix('CVSS:3.0/')}"
+                )
+                break
             else:
                 raise ValueError(f"Unrecognized score type in {self.file}: {score}")
+
             for rel_id in score["products"]:
                 rel_to_cvss[rel_id] = cvss
         return rel_to_cvss
+
+    def extract_remediations(self) -> dict:
+        rel_to_remediations = {}
+        for remediation in self.vulnerability.get("remediations", []):
+            # Skip workarounds (mitigations); extracted in extract_mitigation(). Skip vendor
+            # fixes too because we have that same information from product_status.
+            if remediation["category"] == "workaround" or remediation["category"] == "vendor_fix":
+                continue
+            for product_id in remediation["product_ids"]:
+                rel_to_remediations[product_id] = RESOLUTION_MAP.get(
+                    remediation["details"], remediation["details"]
+                )
+        return rel_to_remediations
 
     def extract_product_status(self) -> dict:
         rel_to_affectedness = {}
         for status, product_ids in self.vulnerability.get("product_status", {}).items():
             for product_id in product_ids:
-                rel_to_affectedness[product_id] = status
+                rel_to_affectedness[product_id] = PRODUCT_STATUS_MAP[status]
         return rel_to_affectedness
 
     def generate_product_map(self) -> dict:
         product_map = {}
 
         def add_to_product_map(rel_id, product_name, product_cpe, component_purl):
-            cvss = self.rel_to_cvss.get(rel_id)
-            cvss = f"{cvss['score']} | {cvss['vector']}" if cvss else "N/A"
+            cvss = self.rel_to_cvss.get(rel_id) or "N/A"
             impact = self.rel_to_impact.get(rel_id, "None")
+            status = self.rel_to_affectedness[rel_id]
+            if rel_id in self.rel_to_remediation:
+                status += f" / {self.rel_to_remediation[rel_id]}"
 
             if product_name not in product_map:
                 product_map[product_name] = {
                     "cpes": {product_cpe},
-                    "components": [component_purl],
-                    "affectedness": {self.rel_to_affectedness[rel_id]},
-                    "cvss": {cvss},
-                    "impact": {impact},
+                    "components": {
+                        component_purl: {"status": status, "cvss": cvss, "impact": impact}
+                    },
                 }
 
             else:
                 product_map[product_name]["cpes"].add(self.products[product_id]["cpe"])
-                product_map[product_name]["components"].append(component_purl)
-                product_map[product_name]["affectedness"].add(self.rel_to_affectedness[rel_id])
-                product_map[product_name]["cvss"].add(cvss)
-                product_map[product_name]["impact"].add(impact)
+                product_map[product_name]["components"][component_purl] = {
+                    "status": status,
+                    "cvss": cvss,
+                    "impact": impact,
+                }
 
         if not self.relationships:
             for product_id, product_data in self.products.items():
@@ -334,38 +364,50 @@ class VEXParser:
 
         return product_map
 
-    def print_text(self) -> None:
-        print("BEGIN_VULNERABILITY")
-        print("CVE ID:", self.cve)
-        if self.discovered_dt:
-            print("Discovered date:", self.discovered_dt)
-        print("Public date:", self.public_date)
-        if self.summary:
-            print("Summary:", self.summary)
-        if self.description:
-            print("Description:", self.description)
-        if self.mitigation:
-            print("Mitigation:", self.mitigation)
-        if self.statement:
-            print("Statement:", self.statement)
-        if self.references:
-            print("References:\n" + self.references)
-        if self.cwe:
-            print("CWE:", self.cwe)
-        if self.acknowledgments:
-            print("Acknowledgments:\n" + self.acknowledgments)
-        print(f"Exploit exists: {self.exploit_exists}")
-        print(self.products)
-        print(self.components)
-        print(self.relationships)
-        print(self.rel_to_impact)
-        print(self.rel_to_cvss)
-        print(self.rel_to_affectedness)
-        print(self.product_map)
-        print("END_VULNERABILITY")
+    def create_documents(self) -> dict[str, str]:
+        documents = {}
+        for product, data in self.product_map.items():
+            output = ["BEGIN_VULNERABILITY", f"CVE ID: {self.cve}"]
+            if self.discovered_dt:
+                output.append(f"Discovered date: {self.discovered_dt}")
+            output.append(f"Public date: {self.public_date}")
+            if self.summary:
+                output.append(f"Summary: {self.summary}")
+            if self.description:
+                output.append(f"Description: {self.description}")
+            if self.mitigation:
+                output.append(f"Mitigation: {self.mitigation}")
+            if self.statement:
+                output.append(f"Statement: {self.statement}")
+            if self.references:
+                output.append(f"References:\n{self.references}")
+            if self.cwe:
+                output.append(f"CWE: {self.cwe}")
+            if self.acknowledgments:
+                output.append(f"Acknowledgments:\n{self.acknowledgments}")
+            output.append(f"Exploit exists: {self.exploit_exists}")
+            output.append(f"Product: {product} ({', '.join(data['cpes'])})")
+            for component, comp_data in data["components"].items():
+                output.append(
+                    f"- {comp_data['status']}: {component} "
+                    f"(Impact: {comp_data['impact']}, {comp_data['cvss']})"
+                )
+            output.append("END_VULNERABILITY")
+
+            # Create a file name from the CVE ID and product name
+            product_part = product.lower().replace(" ", "_").replace("/", "_")
+            file_name = f"{self.cve}:{product_part}"
+            documents[file_name] = "\n".join(output)
+
+        return documents
 
     def save_to_files(self):
-        pass
+        documents = self.create_documents()
+        for file_name, content in documents.items():
+            # Create the output file with .txt extension
+            output_path = FORMATTED_DIR / f"{file_name}.txt"
+            with open(output_path, "w") as f:
+                f.write(content)
 
 
 def main():
@@ -412,7 +454,8 @@ def main():
 
         vex = VEXParser(file, json_data)
         if args.print:
-            vex.print_text()
+            for doc in vex.create_documents().values():
+                print(doc)
         else:
             vex.save_to_files()
 
