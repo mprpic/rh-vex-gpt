@@ -36,9 +36,12 @@ from tqdm import tqdm
 BASE_URL = "https://security.access.redhat.com/data/csaf/v2/vex"
 ARCHIVE_LIST_URL = f"{BASE_URL}/archive_latest.txt"
 CHANGES_CSV_URL = f"{BASE_URL}/changes.csv"
+
 DATA_DIR = Path(__file__).parent / "data"
 ARCHIVE_DIR = DATA_DIR / "archives"
 EXTRACTED_DIR = DATA_DIR / "extracted"
+
+UNAFFECTED_KEYWORD = b'"cpe:/a:redhat"'
 
 
 def ensure_directories():
@@ -97,6 +100,7 @@ def download_archive(filename):
             local_path.unlink()  # Delete partially downloaded file
         sys.exit(1)
 
+
 def extract_archive(archive_path):
     if EXTRACTED_DIR.exists() and any(EXTRACTED_DIR.iterdir()):
         print(
@@ -104,7 +108,7 @@ def extract_archive(archive_path):
         )
         return
 
-    print(f"Extracting {archive_path}")
+    print(f"Decompressing {archive_path}")
     temp_tar = DATA_DIR / "temp.tar"
     with open(archive_path, "rb") as compressed_file:
         dctx = zstd.ZstdDecompressor()
@@ -112,15 +116,28 @@ def extract_archive(archive_path):
             dctx.copy_stream(compressed_file, tar_file)
 
     file_count = 0
+    skipped_count = 0
     with tarfile.open(temp_tar) as tar:
         members = tar.getmembers()
-        for member in tqdm(members, desc="Unpacking files"):
-            tar.extract(member, path=EXTRACTED_DIR, filter="data")
+        for member in tqdm(members, desc="Extracting files from archive"):
             if member.isfile():
+                f = tar.extractfile(member)
+                content = f.read()
+                if UNAFFECTED_KEYWORD in content:
+                    skipped_count += 1
+                    continue
+
+                tar.extract(member, path=EXTRACTED_DIR, filter="data")
                 file_count += 1
+            else:
+                tar.extract(member, path=EXTRACTED_DIR, filter="data")
 
     temp_tar.unlink()
-    print(f"Extraction complete to {EXTRACTED_DIR}: {file_count} files extracted")
+    print(
+        f"Extracted to {EXTRACTED_DIR}: {file_count} files extracted, "
+        f"{skipped_count} unaffected CVE files skipped"
+    )
+
 
 def load_sync_metadata():
     """Read the metadata file if it exists."""
@@ -161,6 +178,7 @@ def parse_changes_csv(csv_content, last_sync_dt: datetime):
 
 def download_individual_files(file_paths):
     success_count = 0
+    skipped_count = 0
     download_errors = []
 
     for file_path in tqdm(file_paths, desc="Downloading files"):
@@ -175,6 +193,10 @@ def download_individual_files(file_paths):
         try:
             response = requests.get(file_url)
             response.raise_for_status()
+
+            if UNAFFECTED_KEYWORD in response.content:
+                skipped_count += 1
+                continue
 
             try:
                 response.json()
@@ -196,7 +218,7 @@ def download_individual_files(file_paths):
 
     print(
         f"Finished downloading individual files: "
-        f"{success_count} successful, {len(download_errors)} failed"
+        f"{success_count} successful, {len(download_errors)} failed, {skipped_count} skipped"
     )
     if download_errors:
         print(f"Failed file downloads:\n{'\n'.join(download_errors)}")
@@ -256,7 +278,6 @@ def main():
         last_sync_at = datetime.fromisoformat(last_sync_at)
         print(f"Last changes sync: {last_sync_at}")
 
-        print("Downloading changes.csv to identify recent updates...")
         changes_csv = get_changes_csv()
         changed_files = parse_changes_csv(changes_csv, last_sync_at)
         if changed_files:
@@ -268,6 +289,8 @@ def main():
     metadata = json.dumps(metadata, indent=2, sort_keys=True)
     with open(DATA_DIR / "metadata.json", "w") as f:
         f.write(metadata)
+
+    print("Done!")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +53,7 @@ class InvalidVEXException(ValueError):
 class VEXParser:
     def __init__(self, file, json_data):
         self.file = file
-        self.data = json.loads(json_data)
+        self.data = json_data
         self._validate()
         # We always have only one vulnerability object in the `vulnerabilities` array
         self.vulnerability = self.data["vulnerabilities"][0]
@@ -417,9 +418,18 @@ def main():
     parser.add_argument(
         "--path",
         "-p",
-        help="Path to a specific VEX file or directory containing VEX files",
+        help=(
+            f"Path to a specific file or directory "
+            f"(defaults to {EXTRACTED_DIR} if option not used)"
+        ),
     )
     parser.add_argument("--print", "-o", action="store_true", help="Print generated content")
+    parser.add_argument(
+        "--force-refresh",
+        "-f",
+        action="store_true",
+        help="Process all files regardless of timestamps",
+    )
 
     args = parser.parse_args()
 
@@ -435,23 +445,56 @@ def main():
             print(f"No file(s) found at: {input_path}")
             sys.exit(1)
     else:
-        files = glob.glob(str(EXTRACTED_DIR / "**/*.json"), recursive=True)
-        if not files:
-            print("No VEX files found in the input directory.")
+        print(f"Searching for relevant files in {EXTRACTED_DIR}")
+        all_files = glob.glob(str(EXTRACTED_DIR / "**/*.json"), recursive=True)
+        if not all_files:
+            print("No VEX files found in the input directory")
             sys.exit(1)
+        print(f"Filtering {len(all_files)} files based on modified time")
+
+        # Filter files based on timestamp unless force-refresh is specified
+        if args.force_refresh:
+            files = all_files
+        else:
+            files = []
+            all_formatted_files = glob.glob(str(FORMATTED_DIR / "*.txt"))
+            formatted_files_by_cve = defaultdict(list)
+            for ff in all_formatted_files:
+                # Get CVE ID from filename: CVE-2025-0514:red_hat_enterprise_linux_9.txt
+                cve_id, _, _ = Path(ff).stem.partition(":")
+                formatted_files_by_cve[cve_id].append(ff)
+
+            for extracted_file in all_files:
+                # Get CVE ID from filename: cve-2025-0001.json
+                cve_id = Path(extracted_file).stem.upper()
+                related_formatted_files = formatted_files_by_cve.get(cve_id, [])
+
+                # If no formatted files exist, include this file for processing
+                if not related_formatted_files:
+                    files.append(extracted_file)
+                    continue
+
+                # Get the most recent formatted file timestamp
+                extracted_mtime = os.path.getmtime(extracted_file)
+                newest_formatted_mtime = max(os.path.getmtime(f) for f in related_formatted_files)
+
+                # Include file if extracted version is newer than formatted version
+                if extracted_mtime > newest_formatted_mtime:
+                    files.append(extracted_file)
 
     # files = test_files
+    if not files:
+        print("No files to process")
+        sys.exit(0)
+
     print(f"Preparing data from {len(files)} files")
 
     iterator = files if args.print else tqdm(files, "Processing VEX files")
     for file in iterator:
         with open(file) as f:
-            json_data = f.read()
+            content = f.read()
 
-        if '"cpe:/a:redhat"' in json_data:
-            # Skip VEX files for CVEs that do not affect Red Hat products.
-            continue
-
+        json_data = json.loads(content)
         vex = VEXParser(file, json_data)
         if args.print:
             for doc in vex.create_documents().values():
