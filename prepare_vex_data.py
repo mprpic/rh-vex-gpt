@@ -19,6 +19,7 @@ from tqdm import tqdm
 DATA_DIR = Path(__file__).parent / "data"
 EXTRACTED_DIR = DATA_DIR / "extracted"
 FORMATTED_DIR = DATA_DIR / "formatted"
+AGGREGATED_FILE = FORMATTED_DIR / "vex_data.jsonl"
 Path(FORMATTED_DIR).mkdir(parents=True, exist_ok=True)
 
 test_files = [
@@ -411,6 +412,22 @@ class VEXParser:
                 f.write(content)
 
 
+def aggregate_data() -> None:
+    formatted_files = list(FORMATTED_DIR.glob("*.txt"))
+    if not formatted_files:
+        print(f"No .txt files found in {FORMATTED_DIR}")
+        return
+
+    print(f"Found {len(formatted_files)} files to aggregate into a JSONL file")
+    with open(AGGREGATED_FILE, "w+") as outfile:
+        for file_path in tqdm(formatted_files, "Aggregating files"):
+            with open(file_path) as infile:
+                content = infile.read().strip()
+                record = {"text": content}
+                json.dump(record, outfile, ensure_ascii=False)
+                outfile.write("\n")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Process VEX files to extract vulnerability information"
@@ -482,25 +499,27 @@ def main():
                 if extracted_mtime > newest_formatted_mtime:
                     files.append(extracted_file)
 
-    # files = test_files
     if not files:
         print("No files to process")
-        sys.exit(0)
+    else:
+        print(f"Preparing data from {len(files)} files")
 
-    print(f"Preparing data from {len(files)} files")
+        iterator = files if args.print else tqdm(files, "Processing VEX files")
+        for file in iterator:
+            with open(file) as f:
+                content = f.read()
 
-    iterator = files if args.print else tqdm(files, "Processing VEX files")
-    for file in iterator:
-        with open(file) as f:
-            content = f.read()
+            json_data = json.loads(content)
+            vex = VEXParser(file, json_data)
+            if args.print:
+                for doc in vex.create_documents().values():
+                    print(doc)
+            else:
+                vex.save_to_files()
 
-        json_data = json.loads(content)
-        vex = VEXParser(file, json_data)
-        if args.print:
-            for doc in vex.create_documents().values():
-                print(doc)
-        else:
-            vex.save_to_files()
+    if not args.print:
+        print("Aggregating data into a JSONL file")
+        aggregate_data()
 
     print("Done!")
 
