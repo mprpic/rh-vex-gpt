@@ -109,7 +109,8 @@ class VEXParser:
             return None
         return next(
             (
-                note.get("text")
+                # Get description, remove invalid unicode characters, and truncate to 2000 chars
+                re.sub(r"�+", "", note.get("text", ""))[:2000] + "..."
                 for note in self.vulnerability["notes"]
                 if note.get("category") == "description"
             ),
@@ -184,10 +185,12 @@ class VEXParser:
         for remediation in self.vulnerability.get("remediations", []):
             # Only one mitigation can exist and it applies to all products.
             if remediation["category"] == "workaround":
-                return remediation["details"]
+                return remediation["details"][:1500]  # Truncate if needed
         return None
 
-    def extract_products_and_components(self) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+    def extract_products_and_components(
+        self,
+    ) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
         product_data: dict[str, dict[str, str]] = {}
         component_data: dict[str, str] = {}
 
@@ -303,7 +306,7 @@ class VEXParser:
         product_map = {}
 
         def add_to_product_map(rel_id, product_name, product_cpe, component_purl):
-            cvss = self.rel_to_cvss.get(rel_id) or "N/A"
+            cvss = self.rel_to_cvss.get(rel_id)
             impact = self.rel_to_impact.get(rel_id, "None")
             status = self.rel_to_affectedness[rel_id]
             if rel_id in self.rel_to_remediation:
@@ -313,7 +316,11 @@ class VEXParser:
                 product_map[product_name] = {
                     "cpes": {product_cpe},
                     "components": {
-                        component_purl: {"status": status, "cvss": cvss, "impact": impact}
+                        component_purl: {
+                            "status": status,
+                            "cvss": cvss,
+                            "impact": impact,
+                        }
                     },
                 }
 
@@ -366,6 +373,55 @@ class VEXParser:
 
         return product_map
 
+    @staticmethod
+    def _chunk_document(content: str, max_tokens: int = 2000) -> list[str]:
+        """Split long documents into overlapping chunks to handle token limits"""
+        lines = content.split("\n")
+        chunks = []
+
+        # Find where components start
+        header_end_idx = 0
+        for i, line in enumerate(lines):
+            if line.startswith("Product:"):
+                header_end_idx = i + 1
+                break
+
+        header_lines = lines[:header_end_idx]
+        component_lines = lines[header_end_idx:-1]  # Exclude END_VULNERABILITY
+
+        # If document is small enough, return as-is
+        estimated_tokens = sum(len(line) for line in lines) // 4
+        if estimated_tokens <= max_tokens:
+            return [content]
+
+        # Chunk component lines
+        current_chunk = []
+        current_length = sum(len(line) for line in header_lines) // 4
+        overlap_size = 10  # Number of components to overlap between chunks
+
+        for i, line in enumerate(component_lines):
+            line_tokens = len(line) // 4
+
+            # If adding this line would exceed limit and we have content, create chunk
+            if current_length + line_tokens > max_tokens and current_chunk:
+                chunk_content = header_lines + current_chunk + ["END_VULNERABILITY"]
+                chunks.append("\n".join(chunk_content))
+
+                # Start new chunk with overlap
+                overlap_start = max(0, len(current_chunk) - overlap_size)
+                current_chunk = current_chunk[overlap_start:]
+                current_length = sum(len(line) for line in header_lines + current_chunk) // 4
+
+            current_chunk.append(line)
+            current_length += line_tokens
+
+        # Add final chunk if there's remaining content
+        if current_chunk:
+            chunk_content = header_lines + current_chunk + ["END_VULNERABILITY"]
+            chunks.append("\n".join(chunk_content))
+
+        return chunks
+
     def create_documents(self) -> dict[str, str]:
         documents = {}
         for product, data in self.product_map.items():
@@ -390,16 +446,30 @@ class VEXParser:
             output.append(f"Exploit exists: {self.exploit_exists}")
             output.append(f"Product: {product} ({', '.join(data['cpes'])})")
             for component, comp_data in data["components"].items():
-                output.append(
-                    f"- {comp_data['status']}: {component} "
-                    f"(Impact: {comp_data['impact']}, {comp_data['cvss']})"
-                )
+                comp_text = f"- {comp_data['status']}: {component} (Impact: {comp_data['impact']}"
+                if comp_data["cvss"]:
+                    comp_text += f", CVSS: {comp_data['cvss']})"
+                output.append(comp_text)
             output.append("END_VULNERABILITY")
+
+            # Create base document content
+            document_content = "\n".join(output)
 
             # Create a file name from the CVE ID and product name
             product_part = product.lower().replace(" ", "_").replace("/", "_")
-            file_name = f"{self.cve}:{product_part}"
-            documents[file_name] = "\n".join(output)
+            base_file_name = f"{self.cve}:{product_part}"
+
+            # Chunk the document if it's too long
+            chunks = self._chunk_document(document_content)
+
+            if len(chunks) == 1:
+                # Single chunk, use original filename
+                documents[base_file_name] = chunks[0]
+            else:
+                # Multiple chunks, add chunk index to filename
+                for i, chunk in enumerate(chunks):
+                    chunk_file_name = f"{base_file_name}_chunk_{i+1:03d}"
+                    documents[chunk_file_name] = chunk
 
         return documents
 

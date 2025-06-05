@@ -4,3 +4,4 @@ venv/
 .ropeproject/
 .ruff_cache/
 .idea/
+logs/
