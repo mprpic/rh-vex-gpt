@@ -10,6 +10,7 @@
 #   "trl",
 # ]
 # ///
+import argparse
 from pathlib import Path
 
 import torch
@@ -24,13 +25,6 @@ from transformers import (
 )
 from trl import SFTTrainer
 
-MODEL_NAME = "mistralai/Mistral-7B-v0.3"
-DATASET_NAME = "mprpic/rh-vex-data"
-OUTPUT_DIR = "./data/model"
-LOGS_DIR = "./data/logs"
-Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
-Path(LOGS_DIR).mkdir(parents=True, exist_ok=True)
-
 # QLoRA parameters
 LORA_R = 128
 LORA_ALPHA = 32
@@ -43,116 +37,145 @@ GRADIENT_ACCUMULATION_STEPS = 2
 LEARNING_RATE = 2e-4
 MAX_SEQ_LENGTH = 2800  # Set specifically to cover largest chunks
 VALIDATION_SPLIT = 0.05  # 5% for validation
+MODEL_NAME = "mistralai/Mistral-7B-v0.3"
+DATASET_NAME = "mprpic/rh-vex-data"
 
-token = Path("~/.cache/huggingface/token").expanduser().read_text().strip()
-hf_login(token=token)
 
-# BitsAndBytes config for 4-bit quantization
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.float16,
-    bnb_4bit_use_double_quant=True,
-)
+def main():
+    parser = argparse.ArgumentParser(description="Fine-tune a model with LoRA")
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        type=str,
+        default="./data",
+        help="Base path for output and logs (default: ./data)",
+    )
+    args = parser.parse_args()
 
-# Load model and tokenizer
-print(f"Loading model: {MODEL_NAME}")
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_NAME,
-    quantization_config=bnb_config,
-    device_map="auto",
-    trust_remote_code=True,
-)
+    base_path = Path(args.output_dir)
+    out_dir = base_path / "model"
+    logs_dir = base_path / "logs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
-# Enable gradient checkpointing to save memory with longer sequences
-model.gradient_checkpointing_enable()
+    print(f"Output directory: {out_dir}")
+    print(f"Logs directory: {logs_dir}")
 
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_NAME,
-    trust_remote_code=True,
-)
-tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = "right"
-tokenizer.model_max_length = MAX_SEQ_LENGTH
+    token = Path("~/.cache/huggingface/token").expanduser().read_text().strip()
+    hf_login(token=token)
 
-# Prepare model for k-bit training
-model = prepare_model_for_kbit_training(model)
+    # BitsAndBytes config for 4-bit quantization
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+    )
 
-# Configure LoRA
-peft_config = LoraConfig(
-    r=LORA_R,
-    lora_alpha=LORA_ALPHA,
-    lora_dropout=LORA_DROPOUT,
-    bias="none",
-    task_type="CAUSAL_LM",
-    target_modules=[
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
-    ],
-)
+    # Load model and tokenizer
+    print(f"Loading model: {MODEL_NAME}")
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        quantization_config=bnb_config,
+        device_map="auto",
+        trust_remote_code=True,
+    )
 
-# Get PEFT model
-model = get_peft_model(model, peft_config)
-model.print_trainable_parameters()
+    # Enable gradient checkpointing to save memory with longer sequences
+    model.gradient_checkpointing_enable()
 
-# Load dataset
-print(f"Loading dataset: {DATASET_NAME}")
-dataset = load_dataset(DATASET_NAME, split="train")
+    tokenizer = AutoTokenizer.from_pretrained(
+        MODEL_NAME,
+        trust_remote_code=True,
+    )
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
+    tokenizer.model_max_length = MAX_SEQ_LENGTH
 
-# Create train/validation split
-dataset_dict = dataset.train_test_split(test_size=VALIDATION_SPLIT, seed=42)
-dataset_dict = DatasetDict({"train": dataset_dict["train"], "validation": dataset_dict["test"]})
+    # Prepare model for k-bit training
+    model = prepare_model_for_kbit_training(model)
 
-# Print dataset info
-print(f"Training samples: {len(dataset_dict['train'])}")
-print(f"Validation samples: {len(dataset_dict['validation'])}")
+    # Configure LoRA
+    peft_config = LoraConfig(
+        r=LORA_R,
+        lora_alpha=LORA_ALPHA,
+        lora_dropout=LORA_DROPOUT,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
+    )
 
-# Training arguments
-training_args = TrainingArguments(
-    output_dir=OUTPUT_DIR,
-    num_train_epochs=EPOCHS,
-    per_device_train_batch_size=BATCH_SIZE,
-    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
-    warmup_steps=100,
-    learning_rate=LEARNING_RATE,
-    fp16=True,
-    logging_dir=LOGS_DIR,
-    logging_steps=25,
-    save_strategy="epoch",
-    evaluation_strategy="epoch",  # Enable validation
-    save_total_limit=2,
-    load_best_model_at_end=True,
-    metric_for_best_model="eval_loss",
-    report_to="none",  # Set to "wandb" or "tensorboard" for logging
-    remove_unused_columns=False,
-    # Additional memory optimization
-    gradient_checkpointing=True,
-    optim="paged_adamw_8bit",  # Use 8-bit optimizer to save memory
-)
+    # Get PEFT model
+    model = get_peft_model(model, peft_config)
+    model.print_trainable_parameters()
 
-# Initialize trainer
-trainer = SFTTrainer(
-    model=model,
-    train_dataset=dataset_dict["train"],
-    eval_dataset=dataset_dict["validation"],
-    tokenizer=tokenizer,
-    args=training_args,
-    dataset_text_field="text",
-    max_seq_length=MAX_SEQ_LENGTH,
-    packing=False,  # Set to True if you want to pack multiple examples
-)
+    # Load dataset
+    print(f"Loading dataset: {DATASET_NAME}")
+    dataset = load_dataset(DATASET_NAME, split="train")
 
-# Train
-print("Starting training...")
-trainer.train()
+    # Create train/validation split
+    dataset_dict = dataset.train_test_split(test_size=VALIDATION_SPLIT, seed=42)
+    dataset_dict = DatasetDict(
+        {"train": dataset_dict["train"], "validation": dataset_dict["test"]}
+    )
 
-# Save the fine-tuned model
-print(f"Saving model to {OUTPUT_DIR}")
-trainer.save_model()
-tokenizer.save_pretrained(OUTPUT_DIR)
-print("Training complete!")
+    # Print dataset info
+    print(f"Training samples: {len(dataset_dict['train'])}")
+    print(f"Validation samples: {len(dataset_dict['validation'])}")
+
+    # Training arguments
+    training_args = TrainingArguments(
+        output_dir=str(out_dir),
+        num_train_epochs=EPOCHS,
+        per_device_train_batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        warmup_steps=100,
+        learning_rate=LEARNING_RATE,
+        fp16=True,
+        logging_dir=str(logs_dir),
+        logging_steps=25,
+        save_strategy="epoch",
+        evaluation_strategy="epoch",  # Enable validation
+        save_total_limit=2,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        report_to="none",  # Set to "wandb" or "tensorboard" for logging
+        remove_unused_columns=False,
+        # Additional memory optimization
+        gradient_checkpointing=True,
+        optim="paged_adamw_8bit",  # Use 8-bit optimizer to save memory
+    )
+
+    # Initialize trainer
+    trainer = SFTTrainer(
+        model=model,
+        train_dataset=dataset_dict["train"],
+        eval_dataset=dataset_dict["validation"],
+        tokenizer=tokenizer,
+        args=training_args,
+        dataset_text_field="text",
+        max_seq_length=MAX_SEQ_LENGTH,
+        packing=False,
+    )
+
+    # Train
+    print("Starting training...")
+    trainer.train()
+
+    # Save the fine-tuned model
+    print(f"Saving model to {out_dir}")
+    trainer.save_model()
+    tokenizer.save_pretrained(str(out_dir))
+    print("Training complete!")
+
+
+if __name__ == "__main__":
+    main()
