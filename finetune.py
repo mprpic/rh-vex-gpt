@@ -10,9 +10,11 @@
 #   "trl",
 #   "sentencepiece",
 #   "protobuf",
+#   "huggingface_hub",
 # ]
 # ///
 import argparse
+import os
 from pathlib import Path
 
 import torch
@@ -62,7 +64,12 @@ def main():
     print(f"Output directory: {out_dir}")
     print(f"Logs directory: {logs_dir}")
 
-    token = Path("~/.cache/huggingface/token").expanduser().read_text().strip()
+    token = os.getenv("HF_TOKEN")
+    if not token:
+        try:
+            token = Path("~/.cache/huggingface/token").expanduser().read_text().strip()
+        except (FileNotFoundError, PermissionError):
+            token = None
     hf_login(token=token)
 
     # BitsAndBytes config for 4-bit quantization
