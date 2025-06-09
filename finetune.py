@@ -8,6 +8,8 @@
 #   "peft",
 #   "bitsandbytes",
 #   "trl",
+#   "sentencepiece",
+#   "protobuf",
 # ]
 # ///
 import argparse
@@ -16,14 +18,13 @@ from pathlib import Path
 import torch
 from datasets import DatasetDict, load_dataset
 from huggingface_hub import login as hf_login
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
-    TrainingArguments,
 )
-from trl import SFTTrainer
+from trl import SFTConfig, SFTTrainer
 
 # QLoRA parameters
 LORA_R = 128
@@ -81,19 +82,12 @@ def main():
         trust_remote_code=True,
     )
 
-    # Enable gradient checkpointing to save memory with longer sequences
-    model.gradient_checkpointing_enable()
-
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_NAME,
         trust_remote_code=True,
     )
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
-    tokenizer.model_max_length = MAX_SEQ_LENGTH
-
-    # Prepare model for k-bit training
-    model = prepare_model_for_kbit_training(model)
 
     # Configure LoRA
     peft_config = LoraConfig(
@@ -113,9 +107,8 @@ def main():
         ],
     )
 
-    # Get PEFT model
-    model = get_peft_model(model, peft_config)
-    model.print_trainable_parameters()
+    print(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+    print(f"GPU memory reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
     # Load dataset
     print(f"Loading dataset: {DATASET_NAME}")
@@ -131,8 +124,7 @@ def main():
     print(f"Training samples: {len(dataset_dict['train'])}")
     print(f"Validation samples: {len(dataset_dict['validation'])}")
 
-    # Training arguments
-    training_args = TrainingArguments(
+    training_args = SFTConfig(
         output_dir=str(out_dir),
         num_train_epochs=EPOCHS,
         per_device_train_batch_size=BATCH_SIZE,
@@ -143,27 +135,26 @@ def main():
         logging_dir=str(logs_dir),
         logging_steps=25,
         save_strategy="epoch",
-        evaluation_strategy="epoch",  # Enable validation
         save_total_limit=2,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        report_to="none",  # Set to "wandb" or "tensorboard" for logging
+        report_to="none",
         remove_unused_columns=False,
-        # Additional memory optimization
+        # Memory optimization
         gradient_checkpointing=True,
-        optim="paged_adamw_8bit",  # Use 8-bit optimizer to save memory
+        optim="paged_adamw_8bit",
+        # Parameters for data handling
+        max_seq_length=MAX_SEQ_LENGTH,
+        dataset_text_field="text",
+        packing=False,
+        # Pass PEFT config directly to SFTConfig
+        peft_config=peft_config,
     )
 
-    # Initialize trainer
     trainer = SFTTrainer(
         model=model,
         train_dataset=dataset_dict["train"],
         eval_dataset=dataset_dict["validation"],
-        tokenizer=tokenizer,
         args=training_args,
-        dataset_text_field="text",
-        max_seq_length=MAX_SEQ_LENGTH,
-        packing=False,
     )
 
     # Train
