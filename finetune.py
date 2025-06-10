@@ -38,7 +38,7 @@ EPOCHS = 3
 BATCH_SIZE = 6
 GRADIENT_ACCUMULATION_STEPS = 2
 LEARNING_RATE = 2e-4
-MAX_SEQ_LENGTH = 2800  # Set specifically to cover largest chunks
+MAX_SEQ_LENGTH = 2048
 VALIDATION_SPLIT = 0.05  # 5% for validation
 MODEL_NAME = "mistralai/Mistral-7B-v0.3"
 DATASET_NAME = "mprpic/rh-vex-data"
@@ -120,6 +120,11 @@ def main():
     # Load dataset
     print(f"Loading dataset: {DATASET_NAME}")
     dataset = load_dataset(DATASET_NAME, split="train")
+
+    # Create a smaller sample of 20k records
+    print(f"Original dataset size: {len(dataset)}")
+    dataset = dataset.shuffle(seed=42).select(range(20000))
+    print(f"New dataset size: {len(dataset)}")
 
     # Create train/validation split
     dataset_dict = dataset.train_test_split(test_size=VALIDATION_SPLIT, seed=42)
