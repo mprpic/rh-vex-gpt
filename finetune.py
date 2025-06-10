@@ -142,6 +142,7 @@ def main():
         logging_dir=str(logs_dir),
         logging_steps=25,
         save_strategy="epoch",
+        eval_strategy="epoch",
         save_total_limit=2,
         load_best_model_at_end=True,
         report_to="none",
@@ -153,8 +154,6 @@ def main():
         max_seq_length=MAX_SEQ_LENGTH,
         dataset_text_field="text",
         packing=False,
-        # Pass PEFT config directly to SFTConfig
-        peft_config=peft_config,
     )
 
     trainer = SFTTrainer(
@@ -162,6 +161,7 @@ def main():
         train_dataset=dataset_dict["train"],
         eval_dataset=dataset_dict["validation"],
         args=training_args,
+        peft_config=peft_config,
     )
 
     # Train
