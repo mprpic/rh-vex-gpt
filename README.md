@@ -6,3 +6,14 @@ This data was parsed out of the CSAF JSON files at and converted into a training
 
 - 🤗 [mprpic/rh-vex-mistral-7b-adapter](https://huggingface.co/mprpic/rh-vex-mistral-7b-adapter)
 - 🤗 [mprpic/rh-vex-mistral-7b-merged](https://huggingface.co/mprpic/rh-vex-mistral-7b-merged)
+
+## Finetuning
+
+On a machine with at least a 24GB VRAM GPU:
+
+```shell
+git clone https://github.com/mprpic/rh-vex-gpt.git && cd rh-vex-gpt/
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+echo HF_TOKEN=<TOKEN> >> .env
+```
